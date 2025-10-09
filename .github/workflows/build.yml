@@ -2,52 +2,69 @@ name: Build and Deploy
 
 on:
   push:
-    branches:
-      - master
+    branches: [ master ]
 
 env:
   APP_VERSION: v1.0.${{ github.run_number }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/backend:v1.0.${{ github.run_number }}
 
 jobs:
   build:
-    name: Build & Deploy
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
-        uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up JDK 11
-        uses: actions/setup-java@v2
+        uses: actions/setup-java@v4
         with:
           java-version: '11'
-          distribution: 'adopt'
-      - name: Build and analyze
-        env:
-          GITHUB_TOKEN: ${{ secrets.ACCESSE_TOKEN }}
-        run: mvn clean install
+          distribution: 'temurin'
+
+      - name: Build jar
+        run: mvn -B -q -e -DskipTests clean package
+
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to DockerHub
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and push
-        id: docker_build
-        uses: docker/build-push-action@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.APP_VERSION }}
+          tags: |
+            ${{ env.BACKEND_IMAGE }}
+          # optionally also push :latest
+          # tags: ${{ env.BACKEND_IMAGE }},${{ secrets.DOCKERHUB_USERNAME }}/backend:latest
+
       - name: Deploy to AWS EC2
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_INSTANCE_PUBLIC_IP }}
           username: ec2-user
-          key: ${{ secrets.SSH_KEY }} # store the SSH password as a secret in the repository
+          key: ${{ secrets.SSH_KEY }}
           script: |
+            set -euo pipefail
             cd /home/ec2-user/ops-basic-spring
-            sudo /usr/local/bin/docker-compose  down || true
-            sed -i 's/image: ${{ secrets.DOCKERHUB_USERNAME }}\/backend:.*/image: ${{ secrets.DOCKERHUB_USERNAME }}\/backend:v1.0.${{ github.run_number }}/g' /home/ec2-user/ops-basic-spring/docker-compose.yml
-            sudo /usr/local/bin/docker-compose  up -d || true
+
+            # write .env for compose
+            cat > .env <<EOF
+            BACKEND_IMAGE=${{ env.BACKEND_IMAGE }}
+            EOF
+
+            # ensure docker group and plugin are usable (first time only)
+            # sudo usermod -aG docker ec2-user || true
+
+            # pull & restart using compose plugin (no dash)
+            sudo docker compose pull appserver || true
+            sudo docker compose up -d
+            sudo docker compose ps
